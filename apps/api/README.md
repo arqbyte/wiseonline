@@ -106,17 +106,79 @@ and application tables land there in later cards.
 | `GET /health` | Readiness — 200 when DB reachable, 503 otherwise (no secret/stack leak) | yes |
 | `GET /health/live` | Liveness — always 200 while the process is up | no |
 
+## Authentication (Better Auth — card 1.2)
+
+[Better Auth](https://better-auth.com) is mounted directly on the underlying
+Express instance (`src/create-app.ts`), not through a Nest controller: Nest's
+body-parser is disabled globally (`bodyParser: false`) and Better Auth's raw
+node handler (`toNodeHandler`) is registered on `/api/auth/*splat` *before*
+`express.json()`/`urlencoded()` are added back for every other route — Better
+Auth needs the unconsumed request body, and Express's route-matching order
+(not Nest's module graph) is what gives it first refusal on its own subtree.
+
+`src/auth/auth.ts` builds the `betterAuth()` instance as a plain module-level
+singleton (Better Auth's own convention, and what `auth generate` statically
+imports) — it can't be built inside Nest's DI graph, so it has its own
+`pg.Pool` (same hardened factory as `DrizzleModule`, `src/db/pg-pool.factory.ts`,
+connecting as `app_user`). `src/auth/auth.module.ts` is DI-only plumbing that
+closes that pool on `app.close()`/shutdown.
+
+### Environment variables
+
+Add to `apps/api/.env` (see `.env.example`):
+
+- `BETTER_AUTH_SECRET` — encrypts sessions/tokens. Generate a real one with
+  `openssl rand -base64 32`; the fail-fast check in `auth.ts` refuses to boot
+  without it (Better Auth itself would otherwise silently fall back to an
+  ephemeral dev secret).
+- `BETTER_AUTH_URL` — this API's own origin.
+- `TRUSTED_ORIGINS` — comma-separated web origins allowed to use auth cookies
+  (PRD §2.2). CSRF/origin checks are never disabled (`advanced.disableCSRFCheck`
+  / `disableOriginCheck` are explicitly `false`).
+
+### Endpoints (this card)
+
+Email/password only, with `requireEmailVerification: true` — the mailer that
+actually sends verification emails is card 1.4, so for now an account stays
+unverified (and therefore can't sign in) until its `email_verified` column is
+flipped some other way (e.g. directly in the DB, as the integration test does).
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/auth/ok` | Built-in Better Auth handshake — confirms the handler is mounted |
+| `POST /api/auth/sign-up/email` | Create an account (unverified) |
+| `POST /api/auth/sign-in/email` | Sign in — `403 EMAIL_NOT_VERIFIED` until verified |
+| `POST /api/auth/sign-out` | Revoke the current session |
+
+### Regenerating the schema
+
+`src/db/schema.ts`'s `user`/`session`/`account`/`verification` tables are
+generated, not hand-written:
+
+```bash
+pnpm --filter api auth:generate   # re-run after changing auth.ts config/plugins
+pnpm --filter api db:generate     # then diff the result into a SQL migration
+pnpm --filter api db:migrate      # and apply it
+```
+
 ### Testing
 
 ```bash
 pnpm --filter api test              # unit (DB mocked)
 pnpm --filter api test:e2e          # e2e (DB-free; placeholder DATABASE_URL)
-pnpm --filter api test:integration  # role isolation + /health vs a REAL DB
+pnpm --filter api test:integration  # role isolation + /health + auth-core vs a REAL DB
 ```
 
 `test:integration` needs a live Postgres — bring up docker-compose and export
-`DATABASE_URL` (app_user) + `MIGRATION_DATABASE_URL` (migrator). CI runs it
-against the same compose stack (`.github/workflows/ci.yml`).
+`DATABASE_URL` (app_user), `MIGRATION_DATABASE_URL` (migrator), and — for the
+auth-core suite — `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `TRUSTED_ORIGINS`.
+CI runs it against the same compose stack (`.github/workflows/ci.yml`).
+
+Better Auth ships ESM-only (`.mjs`); Jest's default CJS transform can't load
+that, so all three Jest configs (`package.json`'s `jest` block, `test/jest-e2e.json`,
+`test/jest-integration.json`) transform every `node_modules` package through
+ts-jest (`transformIgnorePatterns: []`) instead of the default ignore-all-of-
+node_modules behavior.
 
 ### Production hardening (before any non-local deploy)
 
