@@ -28,7 +28,7 @@
     "@nestjs/config": "^4.0.4",
     "@nestjs/core": "^11.0.1",
     "@nestjs/platform-express": "^11.0.1",
-    "better-auth": "^1.6.23",
+    "better-auth": "1.6.23",
     "drizzle-orm": "^0.45.2",
     "express": "5.2.1",
     "pg": "^8.22.0",

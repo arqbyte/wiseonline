@@ -145,7 +145,7 @@ flipped some other way (e.g. directly in the DB, as the integration test does).
 
 | Route | Purpose |
 | --- | --- |
-| `GET /api/auth/ok` | Built-in Better Auth handshake — confirms the handler is mounted |
+| `GET /api/auth/ok` | Built-in Better Auth handshake — confirms the handler is mounted. Body is `{ ok: true }` (the kanban card 1.2 AC text says `{ status: "ok" }`; that's not what the library actually returns) |
 | `POST /api/auth/sign-up/email` | Create an account (unverified) |
 | `POST /api/auth/sign-in/email` | Sign in — `403 EMAIL_NOT_VERIFIED` until verified |
 | `POST /api/auth/sign-out` | Revoke the current session |
@@ -190,6 +190,18 @@ to a managed Postgres with rotated per-role secrets from a secret manager:
 - **Pin the Postgres image** by digest (`postgres:16-alpine@sha256:…`).
 - **Resource limits** and a **backup-before-migrate** gate (drizzle-kit
   migrations are forward-only; `migrator` can `DROP`).
+- **Connection budget**: the API now opens two independent `app_user` pools
+  (`DrizzleModule`'s and Better Auth's own, `max: 10` each — see
+  `src/db/pg-pool.factory.ts`), so one process can hold up to 20 connections
+  rather than 10. Account for this — multiplied across replicas/autoscaled
+  instances — against the target Postgres's `max_connections`, especially on
+  a small managed instance.
+- **No body-size limit or rate limiting yet** on `/api/auth/*` (Better Auth's
+  raw handler reads the request stream directly, ahead of Express's
+  `json()`/`urlencoded()` size caps — see `src/create-app.ts`). This is why
+  the PRD's deployment gate blocks any publicly reachable deployment until
+  card 1.14 (rate limiting) lands; don't expose this API to the internet
+  before then.
 
 ## Project setup
 

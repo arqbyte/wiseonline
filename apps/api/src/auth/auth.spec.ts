@@ -72,4 +72,27 @@ describe('auth config (unit)', () => {
       );
     },
   );
+
+  it('fails fast when BETTER_AUTH_SECRET is shorter than 32 characters', () => {
+    process.env.BETTER_AUTH_SECRET = 'too-short';
+    expect(() => loadAuthModule()).toThrow(/shorter than 32 characters/);
+  });
+
+  it.each(['*', 'http://*', '**', '*://*'])(
+    'fails fast when TRUSTED_ORIGINS is the overbroad wildcard "%s"',
+    (wildcard) => {
+      process.env.TRUSTED_ORIGINS = wildcard;
+      expect(() => loadAuthModule()).toThrow(/not a well-formed web origin/);
+    },
+  );
+
+  it('fails fast when TRUSTED_ORIGINS resolves to zero origins after parsing', () => {
+    process.env.TRUSTED_ORIGINS = ' , , ';
+    expect(() => loadAuthModule()).toThrow(/resolved to zero origins/);
+  });
+
+  it('accepts a scoped subdomain wildcard', () => {
+    process.env.TRUSTED_ORIGINS = 'https://*.wiseonline.com';
+    expect(loadAuthModule()).toHaveProperty('auth');
+  });
 });

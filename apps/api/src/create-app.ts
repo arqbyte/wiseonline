@@ -22,8 +22,21 @@ export async function createApp(): Promise<NestExpressApplication> {
 
   // Mounted directly on the underlying Express instance, before the global
   // body parsers below, so Express's route-matching order — not Nest's
-  // module graph — gives Better Auth first refusal on its own subtree.
+  // module graph — gives Better Auth first refusal on its own subtree. This
+  // ordering is safe against anything Nest itself registers later:
+  // `NestFactory.create()` doesn't run `registerRouter`/`registerModules`
+  // until `app.init()`/`app.listen()`, both of which happen after this
+  // function returns, so every Nest controller/middleware is always
+  // registered on Express *after* the two calls below.
+  //
   // Express 5 requires the named-wildcard form (`*splat`, not bare `*`).
+  //
+  // Caution for future middleware meant to also cover /api/auth/* (e.g. the
+  // rate limiting in kanban card 1.14, if implemented as Express/Nest
+  // middleware rather than Better Auth's own `rateLimit` config): anything
+  // registered with `app.use(...)`/`configure()` after this `.all()` call
+  // will NOT run for requests matching /api/auth/*, since Express dispatches
+  // the first matching handler and never falls through to later middleware.
   app
     .getHttpAdapter()
     .getInstance()

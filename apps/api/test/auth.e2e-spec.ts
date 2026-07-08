@@ -8,6 +8,10 @@ interface AuthErrorBody {
   message: string;
 }
 
+interface AuthOkBody {
+  ok: boolean;
+}
+
 /**
  * DB-free auth coverage: mounting/wiring and the origin/CSRF guard, both of
  * which fire before any DB access. Uses createApp() (not
@@ -29,8 +33,14 @@ describe('Auth core (e2e, DB-free)', () => {
   });
 
   it('GET /api/auth/ok confirms the handler is mounted', async () => {
+    // Better Auth's own built-in handshake route — its body is `{ ok: true }`
+    // (verified against the installed package), not the `{ status: "ok" }`
+    // shape AUTH_KANBAN.md's card 1.2 AC describes. Asserted here so that
+    // discrepancy is a visible, intentional call-out rather than silent.
     const res = await request(app.getHttpServer()).get('/api/auth/ok');
     expect(res.status).toBe(200);
+    const body = res.body as AuthOkBody;
+    expect(body.ok).toBe(true);
   });
 
   it('rejects a sign-in from an untrusted origin (CSRF/origin check is not disabled)', async () => {
@@ -44,13 +54,17 @@ describe('Auth core (e2e, DB-free)', () => {
     expect(body.code).toBe('INVALID_ORIGIN');
   });
 
-  it('still parses JSON bodies for non-auth routes (bodyParser:false is scoped to /api/auth)', async () => {
+  it('non-auth routes are unaffected by the disabled global body-parser', async () => {
+    // No non-auth route in this API accepts a body yet, so this can't
+    // positively assert JSON *parsing* succeeded — only that re-registering
+    // json()/urlencoded() after the Better Auth mount (create-app.ts) didn't
+    // leave the rest of the app hanging or crashing on a JSON POST. Nest's
+    // normal 404 for an unmapped route is what a healthy, unaffected app
+    // returns here.
     const res = await request(app.getHttpServer())
       .post('/definitely-not-a-mapped-route')
       .send({ a: 1 });
 
-    // Nest's normal 404 for an unmapped route, not a hung request or an
-    // unhandled body-parsing crash.
     expect(res.status).toBe(404);
   });
 });

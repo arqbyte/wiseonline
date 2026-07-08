@@ -2,6 +2,13 @@ packages:
   - apps/*
   - packages/*
 allowBuilds:
+  # Pulled in by better-auth's optional Prisma/SQLite/Kysely adapters, which
+  # apps/api doesn't use (it only imports better-auth/adapters/drizzle with
+  # the pg provider) — better-auth statically bundles all its adapters
+  # rather than tree-shaking them, so these two are unavoidable dead weight
+  # at install time, not a real runtime dependency. Risk-accepted rather
+  # than a mistake; revisit if better-auth ever splits adapters into
+  # separate packages.
   '@prisma/client': true
   better-sqlite3: true
   esbuild: true
