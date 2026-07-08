@@ -1,0 +1,124 @@
+name: Release
+
+# Tag-triggered release pipeline: builds & publishes the api/web Docker
+# images to GHCR. `ci.yml` only runs on branch pushes/PRs and is skipped
+# entirely for tag pushes, so this workflow re-runs the same test gate
+# (ci.yml's `unit` job) plus the DB-integration lane before anything is
+# built/pushed — a tag is meant to be a shippable, versioned artifact, so it
+# gets the stricter gate rather than just the PR-level one.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Mirrors ci.yml's `unit` job (fast, DB-free lane: lint, build, unit + e2e
+  # mocked-DB tests). Kept in sync manually since ci.yml is intentionally
+  # left untouched by this workflow.
+  test-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter api lint
+      - run: pnpm --filter api build
+      - run: pnpm --filter api test
+      - run: pnpm --filter api test:e2e
+
+  # Mirrors ci.yml's `db-integration` job. Included here (and not just the
+  # unit lane) because this gate protects a versioned, publishable image
+  # rather than a PR — the role-isolation / /health / auth-core suites
+  # exercise real Postgres + migrations, which is exactly what should be
+  # verified before something ships as `:api-vX.Y.Z` / `:web-vX.Y.Z`.
+  test-db-integration:
+    runs-on: ubuntu-latest
+    env:
+      POSTGRES_DB: wiseonline
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_ci
+      MIGRATOR_PASSWORD: migrator_ci
+      APP_USER_PASSWORD: app_user_ci
+      DATABASE_URL: postgresql://app_user:app_user_ci@127.0.0.1:5432/wiseonline
+      MIGRATION_DATABASE_URL: postgresql://migrator:migrator_ci@127.0.0.1:5432/wiseonline
+      # Better Auth (card 1.2) — auth.integration-spec.ts needs these to
+      # build src/auth/auth.ts, same as DATABASE_URL above.
+      BETTER_AUTH_SECRET: ci_only_placeholder_secret_never_reuse_32chars
+      BETTER_AUTH_URL: http://127.0.0.1:4000
+      TRUSTED_ORIGINS: http://127.0.0.1:3000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Start Postgres (docker compose + init roles)
+        run: docker compose up -d --wait
+
+      - name: Apply migrations as migrator
+        run: pnpm --filter api db:migrate
+
+      - name: Role-isolation + /health + auth-core integration tests
+        run: pnpm --filter api test:integration
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  # Builds + pushes both images to GHCR once the test gate is green.
+  # Matrix keeps the api/web steps identical instead of duplicating jobs.
+  build-push:
+    needs: [test-unit, test-db-integration]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: api
+            dockerfile: apps/api/Dockerfile
+          - app: web
+            dockerfile: apps/web/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Two tags per image:
+      #   - a mutable "current release" tag, e.g. ghcr.io/arqbyte/wiseonline:api
+      #   - an immutable, version-scoped tag using the pushed git tag as-is
+      #     (kept with its `v` prefix, e.g. api-v1.2.0), so the tag string
+      #     matches `git describe`/`github.ref_name` exactly with no
+      #     normalization surprises.
+      - name: Build and push ${{ matrix.app }}
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            ghcr.io/arqbyte/wiseonline:${{ matrix.app }}
+            ghcr.io/arqbyte/wiseonline:${{ matrix.app }}-${{ github.ref_name }}
+          cache-from: type=gha,scope=${{ matrix.app }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.app }}
