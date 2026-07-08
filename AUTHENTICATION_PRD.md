@@ -2,8 +2,8 @@
 
 **Product:** wiseonline — device & asset tracking for startups and SMBs
 **Stack:** Better Auth (TypeScript) · NestJS API (`apps/api`) · Next.js App Router web (`apps/web`) · PostgreSQL (Drizzle)
-**Status:** Draft v1.2 — merges `AUTHENTICATION_SPEC_1.md` and `AUTHENTICATION_SPEC_2.md`, corrected against Better Auth's actual API surface; v1.1 adds the single-organization-per-user invariant and edge cases EC-17…EC-28; v1.2 folds in the pre-implementation security review (EC-29…EC-33 + spec corrections)
-**Last updated:** 2026-07-07
+**Status:** Draft v1.3 — merges `AUTHENTICATION_SPEC_1.md` and `AUTHENTICATION_SPEC_2.md`, corrected against Better Auth's actual API surface; v1.1 adds the single-organization-per-user invariant and edge cases EC-17…EC-28; v1.2 folds in the pre-implementation security review (EC-29…EC-33 + spec corrections); v1.3 folds in a pre-Phase-3 SSO/SCIM production-readiness review (EC-34…EC-35)
+**Last updated:** 2026-07-08
 
 ---
 
@@ -298,6 +298,7 @@ Neither source spec described how a user *exits* an org, yet the single-org inva
 
 - `@better-auth/sso` plugin: per-org SAML 2.0 and OIDC providers, registered through the IdP Setup modal (already designed: SAML metadata upload / OIDC discovery URL).
 - Provisioning: `organizationProvisioning: { disabled: false, defaultRole: "viewer", getRole }` — SSO logins auto-join the provider's org; role can be mapped from IdP attributes/groups later. **Single-org lock-in (EC-17):** if the authenticating user already belongs to a *different* org, provisioning must **not** add a second membership or move them — the `provisionUser`/provisioning hook detects the existing membership, denies the SSO sign-in into this org, and flags it for the org admin (same contractor-at-two-companies case as §6.5).
+- **Existing-account linking is not automatic — must be built explicitly (EC-34).** Each org's SSO connection gets its own dynamically-registered `providerId` (e.g. `acme-corp-saml`), created at runtime when that customer configures it — it cannot be pre-listed in the static `accountLinking.trustedProviders` array (§4.5, currently `["google", "microsoft"]`). Relying on Better Auth's generic trusted-provider linking would therefore either silently create a **duplicate `user` row** for someone who already has a verified Google/Microsoft-OAuth account under the same email, or (with `disableImplicitLinking`) reject their SSO sign-in outright. The `provisionUser` hook must therefore implement the find-existing-verified-user-by-email check itself — look up by `lower(email)` where `emailVerified = true`, reuse that user, and only create a new one when no verified match exists — rather than depending on `trustedProviders`. **Verify hook ordering before relying on it for EC-17:** Better Auth's documented provisioning flow lists "add to org" before "run `provisionUser`" — if EC-17's cross-org rejection is implemented inside `provisionUser`, an integration test must confirm a thrown error there actually prevents the `member` row from persisting (i.e. it runs inside the same transaction), not just that it runs too late to matter.
 - `provisionUser` hook syncs name/avatar on every login (`provisionUserOnEveryLogin: true`).
 - SAML assertions: signature required, timestamp (`NotBefore`/`NotOnOrAfter`) validation with bounded clock skew (plugin built-in), audience restriction, replay-cached assertion IDs.
 - **Enforce SSO** toggle (Roles & SSO settings page):
@@ -328,10 +329,11 @@ Neither source spec described how a user *exits* an org, yet the single-org inva
 7. All operations idempotent: replaying the same SCIM payload is a no-op. `externalId` is stored on the user record for stable matching across email changes.
 
 ### 8.3 Deprovisioning (`DELETE` or `active: false` PATCH)
-1. Set member state `deprovisioned` and revoke **all** of that user's sessions. Under the single-org invariant this is the user's only org, so deprovisioning ends their access entirely and returns them to org-less/limbo if they ever sign in again. *(The org-scoped revocation logic is retained as defense-in-depth — EC-12 — so that if a stray second membership ever exists it is not collaterally destroyed; but in normal operation there is no other org to spare.)*
-2. Remove the member row (**hard delete** — v1.2 decision, §3.2: matches the plugin's behavior and frees the `one_org_per_user` slot for a future re-hire; deprovision history lives in `audit_logs` and the SCIM log, not tombstone rows); keep the `user` row.
-3. If an `employees` row matches the email → trigger the offboarding flow (asset unassignment + return logistics — feeds the designed Return Logs pipeline).
-4. Emit `user.deprovisioned` webhook + audit event.
+1. **Sole/last-owner guard (EC-35):** if the target member is the org's sole owner, or removing them would leave the org with zero owners, **reject with 409** and flag the org admins — never silently deprovision the last owner. This is EC-3's "orphaned tenant" invariant, previously specified only for the self-service leave/transfer/delete flows (§6.6), extended here to the SCIM path. An IdP-side deactivation of the owner (HR marking them terminated, a directory sync misconfiguration) must not be able to permanently orphan the tenant — ownership must be transferred (in-app by another admin, or via a support-mediated path) before SCIM can remove the sole owner.
+2. Set member state `deprovisioned` and revoke **all** of that user's sessions. Under the single-org invariant this is the user's only org, so deprovisioning ends their access entirely and returns them to org-less/limbo if they ever sign in again. *(The org-scoped revocation logic is retained as defense-in-depth — EC-12 — so that if a stray second membership ever exists it is not collaterally destroyed; but in normal operation there is no other org to spare.)*
+3. Remove the member row (**hard delete** — v1.2 decision, §3.2: matches the plugin's behavior and frees the `one_org_per_user` slot for a future re-hire; deprovision history lives in `audit_logs` and the SCIM log, not tombstone rows); keep the `user` row.
+4. If an `employees` row matches the email → trigger the offboarding flow (asset unassignment + return logistics — feeds the designed Return Logs pipeline).
+5. Emit `user.deprovisioned` webhook + audit event.
 
 ---
 
@@ -416,6 +418,8 @@ Merged from both specs (EC-1…4), corrected, and extended with new cases found 
 | **EC-31** | **Stale domain claim** — verification was one-shot; a sold/lost domain keeps routing the new owner's signups into the old org | Periodic DNS TXT re-verification (30-day cycle, 7-day grace + alerts); lapse suspends auto-join and SSO domain-routing until re-verified and reopens the claim (§6.5). |
 | **EC-32** | **Break-glass TOTP gap** — an owner without TOTP enrolled makes break-glass password-only (defeats EC-24) or a lockout (recreates EC-6) | Enabling enforce-SSO with break-glass ON requires all owners TOTP-enrolled; owners of enforced orgs cannot remove their last TOTP factor while break-glass is ON (§7, §9). |
 | **EC-33** | **Membership-flag enumeration oracle** — "already in a workspace" flags let any admin probe emails for wiseonline accounts (and expose moonlighting) | No inviter/admin-visible flags for invites or auto-join; the invite just stays pending; the explanation surfaces only to the invitee at acceptance. SCIM's 409 + flag is retained — a different trust context (§6.3, §6.5, §8.2). |
+| **EC-34** | **SSO-to-existing-account linking gap** — a user with a verified Google/Microsoft OAuth account signs in via their org's newly-configured SSO connection; the per-org SSO `providerId` is dynamic and can't be pre-listed in the static `accountLinking.trustedProviders` array | `provisionUser` must implement its own find-existing-verified-user-by-email linking rather than relying on `trustedProviders`; a thrown rejection for EC-17's cross-org case must be verified to actually block the `member` row from being committed, not just run after the fact (§7). |
+| **EC-35** | **SCIM deprovisions the sole/last owner** — an IdP-side deactivation (HR termination, directory misconfiguration) reaches the SCIM deprovision endpoint for the org's only owner | Deprovisioning is rejected (409) + admin-flagged, same as EC-3's orphaned-tenant guard, extended to the SCIM path; ownership must be transferred (in-app, by another admin, or via support) before the sole owner can be removed (§8.3). |
 
 ---
 
@@ -464,6 +468,11 @@ Added in the v1.2 pre-implementation security review:
 33. **Enumeration-oracle removal** — the v1.1 "already in a workspace" admin flags reversed; disclosure is invitee-side only (§6.3, §6.5, EC-33).
 34. Spec corrections: `verified_domains` duplicate UNIQUE constraint removed (§3.2); `audit_logs.organization_id` made nullable for pre-org auth events (§3.2); member-row lifecycle unified on **hard delete** + plain unique index (§3.2, §8.3); `session_timeout_minutes` defined as a bounded absolute cap (§4.4); SCIM bearer-only + constant-time compare (§8.1); webhook org-scoping stated (§10.3); GDPR export scope stated (§10.4); production cookie architecture prefers same-host path routing with `__Host-` (§2.2); trusted-device cookie softens rather than exempts rate limits (§4.3); deployment gate — no public deployment before the Phase-1 security baseline (kanban).
 
+Added in the v1.3 pre-Phase-3 SSO/SCIM production-readiness review:
+
+35. **SSO-to-existing-account linking made explicit** — dynamic per-org SSO `providerId`s can't populate the static `trustedProviders` array, so `provisionUser` must implement its own verified-email linking; hook-ordering/transaction-atomicity for EC-17's rejection must be empirically verified, not assumed (§7, EC-34).
+36. **SCIM deprovisioning sole/last-owner guard** — the EC-3 "can't orphan the tenant" invariant, previously specified only for the self-service leave/transfer/delete flows (§6.6), extended to the SCIM deprovisioning path (§8.3, EC-35).
+
 Deliberately deferred (recorded as backlog): passkeys, `multiSession` account switching, IdP group→role mapping, SCIM Groups endpoint, anomaly detection on sessions (impossible travel), org data residency, idle-based org session timeout.
 
 ---
@@ -501,6 +510,8 @@ Deliberately deferred (recorded as backlog): passkeys, `multiSession` account sw
 19. **Domain lapse (EC-31):** removing the TXT record → after the re-verification job + grace, auto-join and SSO domain-routing are suspended; restoring the TXT re-enables them.
 20. **Break-glass prerequisite (EC-32):** enabling enforce-SSO with break-glass ON fails while any owner lacks TOTP; an enrolled owner cannot remove their last TOTP factor while it is ON.
 21. **Invite enumeration (EC-33):** inviting an address that belongs to a member of another org is indistinguishable — in response, timing, and list display — from inviting a fresh address.
+22. **SSO existing-account linking (EC-34):** a user with an existing verified Google/Microsoft-OAuth account signs in via their org's new SSO connection with the same email → links to the same `user` row (no duplicate created, existing role/data preserved); the inverse — an unverified pre-existing account — is rejected/flagged per EC-2. A cross-org SSO attempt (EC-17) is confirmed to leave **no** `member` row behind, not just a rejected response.
+23. **SCIM sole-owner guard (EC-35):** a SCIM deprovision/deactivate targeting the org's sole owner (or the last remaining owner) is rejected with 409 and flags admins; deprovisioning succeeds once ownership has been transferred to another member.
 
 ## 15. Open questions
 

@@ -6,7 +6,7 @@ Source: `AUTHENTICATION_PRD.md`. One card = one branch = one PR. Cards are order
 
 Branch convention: `feat/*`, `chore/*`, `test/*` off `main`; PR title = card title.
 
-> **Core invariant (PRD §1):** a user belongs to **exactly one organization** at a time — no multi-org membership, no workspace switcher. Enforced in-app *and* by a `one_org_per_user` DB index; the multi-tenant isolation machinery is kept as defense-in-depth. This threads through cards 1.8, 1.9, 1.12, 3.3, 3.5 and the lifecycle card 2.10. v1.1 of the PRD added edge cases **EC-17…EC-28**; the affected cards below carry an "Added in PRD v1.1" criteria block. The v1.2 pre-implementation security review added **EC-29…EC-33** + spec corrections (v1.2 blocks below).
+> **Core invariant (PRD §1):** a user belongs to **exactly one organization** at a time — no multi-org membership, no workspace switcher. Enforced in-app *and* by a `one_org_per_user` DB index; the multi-tenant isolation machinery is kept as defense-in-depth. This threads through cards 1.8, 1.9, 1.12, 3.3, 3.5 and the lifecycle card 2.10. v1.1 of the PRD added edge cases **EC-17…EC-28**; the affected cards below carry an "Added in PRD v1.1" criteria block. The v1.2 pre-implementation security review added **EC-29…EC-33** + spec corrections (v1.2 blocks below). The v1.3 pre-Phase-3 SSO/SCIM production-readiness review added **EC-34…EC-35** (v1.3 blocks below, cards 3.1 and 3.6).
 
 > ⚠️ **Deployment gate (PRD v1.2):** **no publicly reachable deployment** of the API until the Phase-1 security baseline is merged — 1.9 (guards), 1.10 (RLS), 1.14 (rate limiting), 1.16 (audit), 1.17 (isolation suite). Cards 1.2–1.8 put live credential endpoints in the codebase; between their merge and the baseline, deploy only behind private access (VPN/localhost/preview auth). Sign-up/sign-in with no brute-force protection or audit trail must never face the internet.
 
@@ -230,6 +230,9 @@ Self-serve data export (fresh session) and deletion with 14-day grace; sole-owne
 - [ ] SAML login against Okta dev + OIDC against Entra dev succeed
 - [ ] Assertion signature/timestamp/audience validation verified; replayed assertion rejected
 - [ ] SSO login auto-joins the provider's org as `viewer`
+- [ ] **(v1.3, EC-34)** `provisionUser` implements its own find-existing-verified-user-by-email linking (not `accountLinking.trustedProviders`, which can't hold a dynamic per-org SSO `providerId`); a user with an existing verified Google/Microsoft account signs in via SSO with the same email → same `user` row reused, no duplicate created
+- [ ] **(v1.3, EC-34)** an unverified pre-existing account at the SSO email → rejected + admin-flagged, not linked (EC-2)
+- [ ] **(v1.3, EC-34)** a cross-org SSO attempt (EC-17) is confirmed — via a real integration test, not just a rejected HTTP response — to leave no `member` row committed
 
 ### 3.2 Domain verification (DNS TXT)
 `feat/domain-verification` · labels: `phase:3 area:api area:web security` · depends: 1.8
@@ -269,11 +272,12 @@ Custom NestJS `/scim/v2/*` per PRD §8: per-org hashed bearer tokens, email/`ext
 - [ ] **(v1.2)** `/scim/v2/*` accepts **bearer auth only** — session cookies ignored (cookie-honoring SCIM routes are CSRF-able); token compare constant-time via prefix lookup + timing-safe equality (PRD §8.1)
 
 ### 3.6 SCIM deprovision → offboarding
-`feat/scim-offboarding` · labels: `phase:3 area:api` · depends: 3.5, 2.7
+`feat/scim-offboarding` · labels: `phase:3 area:api` · depends: 3.5, 2.7, 2.10
 Deprovision flow per PRD §8.3: org-scoped session revocation (spare other orgs — EC-12), member removal, matching-employee asset-return trigger feeding Return Logs.
 - [ ] Multi-org user keeps org-B access after org-A SCIM delete
 - [ ] Matching employee record opens the return-logistics flow
 - [ ] `user.deprovisioned` webhook emitted
+- [ ] **(v1.3, EC-35)** deprovisioning the org's sole/last owner is rejected (409) + admin-flagged; succeeds only after ownership is transferred to another member (depends on 2.10's transfer flow)
 
 ### 3.7 Dynamic custom roles
 `feat/rbac-dynamic-roles` · labels: `phase:3 area:api area:web` · depends: 1.13
