@@ -28,7 +28,8 @@ jobs:
 
   # DB lane: brings up Postgres via the SAME docker-compose.yml + init script
   # devs use locally (so CI and local can't drift), applies migrations as the
-  # migrator role, then runs the role-isolation + /health integration suite.
+  # migrator role, then runs the role-isolation + /health + auth-core
+  # (sign-up/sign-in/sign-out) integration suites.
   db-integration:
     runs-on: ubuntu-latest
     env:
@@ -39,6 +40,11 @@ jobs:
       APP_USER_PASSWORD: app_user_ci
       DATABASE_URL: postgresql://app_user:app_user_ci@127.0.0.1:5432/wiseonline
       MIGRATION_DATABASE_URL: postgresql://migrator:migrator_ci@127.0.0.1:5432/wiseonline
+      # Better Auth (card 1.2) — auth.integration-spec.ts needs these to
+      # build src/auth/auth.ts, same as DATABASE_URL above.
+      BETTER_AUTH_SECRET: ci_only_placeholder_secret_never_reuse_32chars
+      BETTER_AUTH_URL: http://127.0.0.1:4000
+      TRUSTED_ORIGINS: http://127.0.0.1:3000
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -54,7 +60,7 @@ jobs:
       - name: Apply migrations as migrator
         run: pnpm --filter api db:migrate
 
-      - name: Role-isolation + /health integration tests
+      - name: Role-isolation + /health + auth-core integration tests
         run: pnpm --filter api test:integration
 
       - name: Tear down
