@@ -2,9 +2,6 @@
   <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
 </p>
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
-
   <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
     <p align="center">
 <a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
@@ -24,6 +21,113 @@
 ## Description
 
 [Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+
+## Database (Postgres + Drizzle)
+
+Local Postgres runs via docker-compose (repo root) and is accessed through
+[Drizzle ORM](https://orm.drizzle.team) using the `pg` (node-postgres) driver.
+
+### Role model (PRD §5 Layer 3 — Postgres RLS defense in depth)
+
+The bootstrap Postgres superuser (`POSTGRES_USER`, from the root `.env`)
+creates two application roles on first container init
+(`docker/postgres/init/01-roles.sh`):
+
+| Role | Used by | Privileges |
+| --- | --- | --- |
+| `migrator` | `pnpm --filter api db:generate` / `db:migrate` only | Owns the `public` schema and every table it creates in it. Runs all DDL. |
+| `app_user` | The running API (`DrizzleModule`) | `LOGIN NOBYPASSRLS`. Owns **nothing**. Gets `SELECT/INSERT/UPDATE/DELETE` on tables `migrator` creates, via `ALTER DEFAULT PRIVILEGES`. |
+
+The API never connects as `migrator`, and the migration scripts never
+connect as `app_user`. This split is required so that Row-Level Security
+policies (added in a later card, "Tenant-scoped repositories + Postgres
+RLS") can't be bypassed by the application's own connection — `NOBYPASSRLS`
+plus no ownership means `FORCE ROW LEVEL SECURITY` policies apply to
+`app_user` even though it's the role actually running tenant queries.
+
+### Environment variables
+
+Copy the example env files and fill in local-dev values (defaults already
+line up with docker-compose's defaults):
+
+```bash
+cp .env.example .env                      # repo root — docker-compose (superuser + role passwords)
+cp apps/api/.env.example apps/api/.env     # apps/api — DATABASE_URL / MIGRATION_DATABASE_URL
+```
+
+- `DATABASE_URL` — runtime connection string, `app_user` role. Read by
+  `@nestjs/config`'s `ConfigModule` at Nest boot; the app **fails fast**
+  (throws before listening) if this is missing.
+- `MIGRATION_DATABASE_URL` — migration-only connection string, `migrator`
+  role. Read by `apps/api/drizzle.config.ts` (drizzle-kit).
+
+### Start Postgres
+
+From the repo root:
+
+```bash
+docker compose up -d
+docker compose ps          # wait for postgres to report "healthy"
+```
+
+This starts `postgres:16-alpine`, persists data in the named volume
+`wiseonline_postgres_data`, and runs `docker/postgres/init/01-roles.sh` on
+first init to create the `migrator` and `app_user` roles.
+
+### Generate & run migrations
+
+```bash
+pnpm --filter api db:generate   # diff src/db/schema.ts -> SQL files in apps/api/migrations
+pnpm --filter api db:migrate    # apply pending migrations, connects as `migrator`
+```
+
+`src/db/schema.ts` starts empty; Better-Auth-generated tables (card 1.2)
+and application tables land there in later cards.
+
+### DB client in the app
+
+`src/db/drizzle.module.ts` is a global NestJS module exporting:
+
+- `DRIZZLE` (injection token) — the pooled Drizzle client (`app_user`).
+- `PG_POOL` (injection token) — the underlying `pg.Pool`, for the
+  per-request transaction wrapper a later card adds (`SET LOCAL
+  app.current_org = $orgId` for RLS).
+- `DrizzleHealthService` — injectable; `ping()` runs `SELECT 1` (2s timeout)
+  through the `app_user` client and returns `{ ok, latencyMs }`. Consumed by
+  the `/health` controller (`GET /health` = readiness w/ DB round-trip →
+  200/503; `GET /health/live` = liveness, no DB).
+- `DbRoleAssertionService` — at boot (non-test), refuses to start if the
+  runtime role is `SUPERUSER`/`BYPASSRLS` (which would defeat RLS).
+
+### Health endpoints
+
+| Route | Purpose | DB? |
+| --- | --- | --- |
+| `GET /health` | Readiness — 200 when DB reachable, 503 otherwise (no secret/stack leak) | yes |
+| `GET /health/live` | Liveness — always 200 while the process is up | no |
+
+### Testing
+
+```bash
+pnpm --filter api test              # unit (DB mocked)
+pnpm --filter api test:e2e          # e2e (DB-free; placeholder DATABASE_URL)
+pnpm --filter api test:integration  # role isolation + /health vs a REAL DB
+```
+
+`test:integration` needs a live Postgres — bring up docker-compose and export
+`DATABASE_URL` (app_user) + `MIGRATION_DATABASE_URL` (migrator). CI runs it
+against the same compose stack (`.github/workflows/ci.yml`).
+
+### Production hardening (before any non-local deploy)
+
+The docker-compose stack is **local dev only**. Before deploying, in addition
+to a managed Postgres with rotated per-role secrets from a secret manager:
+
+- **TLS**: set `DATABASE_SSL=true` and use `sslmode=verify-full` connection
+  strings (the pool enforces `rejectUnauthorized`).
+- **Pin the Postgres image** by digest (`postgres:16-alpine@sha256:…`).
+- **Resource limits** and a **backup-before-migrate** gate (drizzle-kit
+  migrations are forward-only; `migrator` can `DROP`).
 
 ## Project setup
 

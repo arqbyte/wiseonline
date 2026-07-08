@@ -1,6 +1,7 @@
 {
   "name": "wiseonline",
   "private": true,
+  "packageManager": "pnpm@11.10.0",
   "scripts": {
     "dev": "pnpm --parallel --filter \"./apps/*\" dev",
     "dev:web": "pnpm --filter web dev",

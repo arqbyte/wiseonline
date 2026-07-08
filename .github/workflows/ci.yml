@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fast, DB-free lane: lint, build, unit + e2e (mocked DB) tests.
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter api lint
+      - run: pnpm --filter api build
+      - run: pnpm --filter api test
+      - run: pnpm --filter api test:e2e
+
+  # DB lane: brings up Postgres via the SAME docker-compose.yml + init script
+  # devs use locally (so CI and local can't drift), applies migrations as the
+  # migrator role, then runs the role-isolation + /health integration suite.
+  db-integration:
+    runs-on: ubuntu-latest
+    env:
+      POSTGRES_DB: wiseonline
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_ci
+      MIGRATOR_PASSWORD: migrator_ci
+      APP_USER_PASSWORD: app_user_ci
+      DATABASE_URL: postgresql://app_user:app_user_ci@127.0.0.1:5432/wiseonline
+      MIGRATION_DATABASE_URL: postgresql://migrator:migrator_ci@127.0.0.1:5432/wiseonline
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Start Postgres (docker compose + init roles)
+        run: docker compose up -d --wait
+
+      - name: Apply migrations as migrator
+        run: pnpm --filter api db:migrate
+
+      - name: Role-isolation + /health integration tests
+        run: pnpm --filter api test:integration
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
