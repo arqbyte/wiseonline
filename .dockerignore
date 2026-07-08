@@ -1,0 +1,62 @@
+# -----------------------------------------------------------------------------
+# Root .dockerignore
+#
+# Both apps/api/Dockerfile and apps/web/Dockerfile are built with the repo
+# root as build context (`docker build -f apps/<app>/Dockerfile .`), so this
+# file governs what's available to COPY in *both* images. Keep it broad:
+# smaller build context = faster `docker build` (less to send to the daemon)
+# and no chance of secrets/dev artifacts accidentally ending up in a layer.
+# -----------------------------------------------------------------------------
+
+# Version control / editor / agent metadata
+.git
+.github
+.gitignore
+.claude
+.agents
+.mcp.json
+.vscode
+.idea
+
+# Dependencies (always reinstalled inside the image via pnpm)
+node_modules
+**/node_modules
+
+# Build output (always rebuilt inside the image)
+dist
+**/dist
+.next
+**/.next
+out
+**/out
+build
+**/build
+coverage
+**/coverage
+**/*.tsbuildinfo
+
+# Env files / secrets — never bake these into an image. Images are pulled by
+# runtime config (compose env, k8s secrets, etc.), not baked-in .env files.
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+
+# Logs
+*.log
+**/*.log
+.pnpm-debug.log*
+
+# Docs — irrelevant to the build, only bloats build-context transfer
+*.md
+**/*.md
+
+# Local Postgres bootstrap + compose (not part of either app image)
+docker
+docker-compose.yml
+
+# Misc
+.DS_Store
+skills-lock.json
